@@ -1,110 +1,136 @@
--- debug.lua
---
--- Shows how to use the DAP plugin to debug your code.
---
--- Primarily focused on configuring the debugger for Go, but can
--- be extended to other languages as well. That's why it's called
--- kickstart.nvim and not kitchen-sink.nvim ;)
+local M = {}
 
----@module 'lazy'
----@type LazySpec
+function M.setup()
+    -- Tables acquired from the plugins
+    local dap     = require('dap')
+    local dapview = require('dap-view')
+    local pb_api  = require('persistent-breakpoints.api')
+
+    -- XXX:
+    -- dap.defaults.fallback.terminal_win_cmd = function() end
+    -- Listener for auto/close
+    dapview.setup()
+
+    local function set_debug_keymaps()
+        vim.keymap.set('n', '<Right>', function() dap.step_over() end, { desc = 'DAP: step over' })
+        vim.keymap.set('n', '<Down>', function() dap.step_into() end, { desc = 'DAP: step into' })
+        vim.keymap.set('n', '<Up>', function() dap.step_out() end, { desc = 'DAP: step out' })
+        vim.keymap.set('n', '<Left>', function() dap.restart_frame() end, { desc = 'DAP: restart frame' })
+        vim.keymap.set('n', '<Enter>', function() dap.continue() end, { desc = 'DAP: continue' })
+    end
+
+    dap.listeners.after.event_initialized.dapview_config = function()
+        dapview.open()
+        set_debug_keymaps()
+    end
+
+    dap.listeners.before.event_terminated.dapview_config = function()
+        dapview.close()
+        vim.notify("Debug session ended.", vim.log.levels.INFO)
+    end
+    dap.listeners.before.event_exited.dapview_config = function(_, body)
+        dapview.close()
+        local code = body and body.exitCode or "?"
+        vim.notify("Process exited with code " .. code .. ".", vim.log.levels.INFO)
+    end
+
+    -- Breakpoint signs
+    vim.fn.sign_define('DapBreakpoint', { text = '●', texthl = 'DiagnosticError' })
+    vim.fn.sign_define('DapBreakpointCondition', { text = '◆', texthl = 'DiagnosticError' })
+    vim.fn.sign_define('DapBreakpointRejected', { text = '✗', texthl = 'DiagnosticHint' })
+
+    -- Highlight the line of the breakpoint currently active
+    vim.api.nvim_set_hl(0, 'DapStoppedLine', { link = 'CursorLine' })
+    vim.api.nvim_set_hl(0, 'DapStoppedLineNr', {
+        fg = vim.api.nvim_get_hl(0, { name = 'DiagnosticOk' }).fg,
+        bg = vim.api.nvim_get_hl(0, { name = 'CursorLine' }).bg,
+    })
+    vim.fn.sign_define('DapStopped',
+        { text = '●', texthl = 'DiagnosticOk', linehl = 'DapStoppedLine', numhl = 'DapStoppedLineNr' })
+
+    -- Persistent breakpoints, save them on disk
+    vim.keymap.set('n', '<leader>db', pb_api.toggle_breakpoint, { desc = 'DAP: toggle breakpoint' })
+    vim.keymap.set('n', '<leader>dB', pb_api.set_conditional_breakpoint, { desc = 'DAP: conditional breakpoint' })
+    vim.keymap.set('n', '<leader>dC', pb_api.clear_all_breakpoints, { desc = 'DAP: clear all breakpoints' })
+    vim.keymap.set('n', '<leader>du', function() dapview.toggle() end, { desc = 'DAP: toggle UI' })
+    vim.keymap.set('n', '<leader>dc', function() dap.continue() end, { desc = 'DAP: continue' })
+    vim.keymap.set('n', '<leader>dd', function() dap.run_to_cursor() end, { desc = 'DAP: run to cursor' })
+    vim.keymap.set('n', '<leader>dx', function() dap.restart_frame() end, { desc = 'DAP: restart frame' })
+    vim.keymap.set('n', '<leader>ds', function()
+        -- TODO: Verify "false" is the appropriate value
+        dap.disconnect({ terminateDebuggee = false })
+        dapview.close()
+    end, { desc = 'DAP: disconnect' })
+    vim.keymap.set('n', '<leader>dr', function() dap.restart() end, { desc = 'DAP: Restart' })
+    vim.keymap.set('n', '<leader>do', function() dap.step_over() end, { desc = 'DAP: step over' })
+    vim.keymap.set('n', '<leader>di', function() dap.step_into() end, { desc = 'DAP: step into' })
+    vim.keymap.set('n', '<leader>dt', function() dap.step_out() end, { desc = 'DAP: step out' })
+
+    -- Built-in for easy evaluation
+    local widgets = require('dap.ui.widgets')
+    vim.keymap.set('n', '<leader>de', function()
+        widgets.hover()
+    end, { desc = 'DAP: eval word under cursor' })
+    vim.keymap.set('v', '<leader>de', function()
+        widgets.hover()
+    end, { desc = 'DAP: eval selection' })
+
+    -- Dispatch table — profile loader
+    local loaders = {
+        stm32 = function() return require('kickstart.plugins.debug.debug_stm32') end,
+        esp32 = function() return require('kickstart.plugins.debug.dap_esp32') end,
+        python = function() return require('kickstart.plugins.debug.debug_python') end,
+        infineon = function() return require('kickstart.plugins.debug.debug_infineon') end,
+        -- local_c = function() return require('dap.dap_local_c') end,
+    }
+
+    local profile = require("custom.profile").detect_profile()
+    local loader = loaders[profile]
+
+    if loader then
+        local ok, mod = pcall(loader)
+        if ok and mod then
+            pcall(mod.setup)
+        end
+    end
+end
+
 return {
-  -- NOTE: Yes, you can install new plugins here!
-  'mfussenegger/nvim-dap',
-  -- NOTE: And you can specify dependencies as well
-  dependencies = {
-    -- Creates a beautiful debugger UI
-    'rcarriga/nvim-dap-ui',
-
-    -- Required dependency for nvim-dap-ui
-    'nvim-neotest/nvim-nio',
-
-    -- Installs the debug adapters for you
-    'mason-org/mason.nvim',
-    'jay-babu/mason-nvim-dap.nvim',
-
-    -- Add your own debuggers here
-    'leoluz/nvim-dap-go',
-  },
-  keys = {
-    -- Basic debugging keymaps, feel free to change to your liking!
-    { '<F5>', function() require('dap').continue() end, desc = 'Debug: Start/Continue' },
-    { '<F1>', function() require('dap').step_into() end, desc = 'Debug: Step Into' },
-    { '<F2>', function() require('dap').step_over() end, desc = 'Debug: Step Over' },
-    { '<F3>', function() require('dap').step_out() end, desc = 'Debug: Step Out' },
-    { '<leader>b', function() require('dap').toggle_breakpoint() end, desc = 'Debug: Toggle Breakpoint' },
-    { '<leader>B', function() require('dap').set_breakpoint(vim.fn.input 'Breakpoint condition: ') end, desc = 'Debug: Set Breakpoint' },
-    -- Toggle to see last session result. Without this, you can't see session output in case of unhandled exception.
-    { '<F7>', function() require('dapui').toggle() end, desc = 'Debug: See last session result.' },
-  },
-  config = function()
-    local dap = require 'dap'
-    local dapui = require 'dapui'
-
-    require('mason-nvim-dap').setup {
-      -- Makes a best effort to setup the various debuggers with
-      -- reasonable debug configurations
-      automatic_installation = true,
-
-      -- You can provide additional configuration to the handlers,
-      -- see mason-nvim-dap README for more information
-      handlers = {},
-
-      -- You'll need to check that you have the required things installed
-      -- online, please don't ask me how to install them :)
-      ensure_installed = {
-        -- Update this to ensure that you have the debuggers for the langs you want
-        'delve',
-      },
-    }
-
-    -- Dap UI setup
-    -- For more information, see |:help nvim-dap-ui|
-    ---@diagnostic disable-next-line: missing-fields
-    dapui.setup {
-      -- Set icons to characters that are more likely to work in every terminal.
-      --    Feel free to remove or use ones that you like more! :)
-      --    Don't feel like these are good choices.
-      icons = { expanded = '▾', collapsed = '▸', current_frame = '*' },
-      ---@diagnostic disable-next-line: missing-fields
-      controls = {
-        icons = {
-          pause = '⏸',
-          play = '▶',
-          step_into = '⏎',
-          step_over = '⏭',
-          step_out = '⏮',
-          step_back = 'b',
-          run_last = '▶▶',
-          terminate = '⏹',
-          disconnect = '⏏',
+    'mfussenegger/nvim-dap',
+    dependencies = {
+        'nvim-neotest/nvim-nio',
+        {
+            'igorlfs/nvim-dap-view',
+            dependencies = { 'mfussenegger/nvim-dap' },
+            opts = {
+                winbar = {
+                    sections = { 'watches', 'scopes', 'exceptions', 'breakpoints', 'threads', 'repl', 'console', },
+                },
+            },
+            windows = {
+                terminal = {
+                    start_hidden = true,
+                },
+            },
         },
-      },
-    }
-
-    -- Change breakpoint icons
-    -- vim.api.nvim_set_hl(0, 'DapBreak', { fg = '#e51400' })
-    -- vim.api.nvim_set_hl(0, 'DapStop', { fg = '#ffcc00' })
-    -- local breakpoint_icons = vim.g.have_nerd_font
-    --     and { Breakpoint = '', BreakpointCondition = '', BreakpointRejected = '', LogPoint = '', Stopped = '' }
-    --   or { Breakpoint = '●', BreakpointCondition = '⊜', BreakpointRejected = '⊘', LogPoint = '◆', Stopped = '⭔' }
-    -- for type, icon in pairs(breakpoint_icons) do
-    --   local tp = 'Dap' .. type
-    --   local hl = (type == 'Stopped') and 'DapStop' or 'DapBreak'
-    --   vim.fn.sign_define(tp, { text = icon, texthl = hl, numhl = hl })
-    -- end
-
-    dap.listeners.after.event_initialized['dapui_config'] = dapui.open
-    dap.listeners.before.event_terminated['dapui_config'] = dapui.close
-    dap.listeners.before.event_exited['dapui_config'] = dapui.close
-
-    -- Install golang specific config
-    require('dap-go').setup {
-      delve = {
-        -- On Windows delve must be run attached or it crashes.
-        -- See https://github.com/leoluz/nvim-dap-go/blob/main/README.md#configuring
-        detached = vim.fn.has 'win32' == 0,
-      },
-    }
-  end,
+        {
+            'Weissle/persistent-breakpoints.nvim',
+            dependencies = { 'mfussenegger/nvim-dap' },
+            config = function()
+                require('persistent-breakpoints').setup({
+                    save_dir = vim.fn.stdpath('data') .. '/nvim_checkpoints',
+                    load_breakpoints_event = { 'BufReadPost' },
+                })
+            end,
+        },
+        {
+            "rcarriga/nvim-dap-ui",
+            dependencies = { "mfussenegger/nvim-dap",
+                "nvim-neotest/nvim-nio" }
+        },
+        'jedrzejboczar/nvim-dap-cortex-debug',
+    },
+    config = function()
+        M.setup()
+    end,
 }
